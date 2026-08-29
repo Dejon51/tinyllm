@@ -1,3 +1,11 @@
-test.exe
-.vscode
+# Executables
 *.exe
+
+# Build files
+build/
+
+# VS Code
+.vscode/
+
+# Test executable
+test.exe
