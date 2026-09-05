@@ -8,6 +8,10 @@
 typedef struct {
     float embeddings[VOCAB_SIZE][EMBED_SIZE];
     float position_embeddings[CONTEXT_SIZE][EMBED_SIZE];
+
+    float Wq[EMBED_SIZE][EMBED_SIZE];
+    float Wk[EMBED_SIZE][EMBED_SIZE];
+    float Wv[EMBED_SIZE][EMBED_SIZE];
 } Model;
 
 void model_init(Model *model);

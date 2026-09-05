@@ -3,8 +3,10 @@
 
 void model_init(Model *model)
 {
-    for (int token = 0; token < VOCAB_SIZE; token++) {
-        for (int i = 0; i < EMBED_SIZE; i++) {
+    for (int token = 0; token < VOCAB_SIZE; token++)
+    {
+        for (int i = 0; i < EMBED_SIZE; i++)
+        {
 
             float random = (float)rand() / (float)RAND_MAX;
 
@@ -12,25 +14,49 @@ void model_init(Model *model)
         }
     }
 
-    for (int pos = 0; pos < CONTEXT_SIZE; pos++) {
-        for (int i = 0; i < EMBED_SIZE; i++) {
+    for (int pos = 0; pos < CONTEXT_SIZE; pos++)
+    {
+        for (int i = 0; i < EMBED_SIZE; i++)
+        {
 
             float random = (float)rand() / (float)RAND_MAX;
 
             model->position_embeddings[pos][i] = random * 0.02f - 0.01f;
         }
     }
+    // Attention weights
+    for (int i = 0; i < EMBED_SIZE; i++)
+    {
+        for (int j = 0; j < EMBED_SIZE; j++)
+        {
+
+            float random = (float)rand() / (float)RAND_MAX;
+
+            model->Wq[i][j] =
+                random * 0.02f - 0.01f;
+
+            random = (float)rand() / (float)RAND_MAX;
+
+            model->Wk[i][j] =
+                random * 0.02f - 0.01f;
+
+            random = (float)rand() / (float)RAND_MAX;
+
+            model->Wv[i][j] =
+                random * 0.02f - 0.01f;
+        }
+    }
 }
 void get_embedding(
     Model *model,
     int token,
-    float *output
-)
+    float *output)
 {
     if (token < 0 || token >= VOCAB_SIZE)
         return;
 
-    for (int i = 0; i < EMBED_SIZE; i++) {
+    for (int i = 0; i < EMBED_SIZE; i++)
+    {
         output[i] = model->embeddings[token][i];
     }
 }
@@ -39,15 +65,18 @@ void embed_sequence(
     Model *model,
     int *tokens,
     int length,
-    float output[CONTEXT_SIZE][EMBED_SIZE]
-)
+    float output[CONTEXT_SIZE][EMBED_SIZE])
 {
-    for (int pos = 0; pos < length; pos++) {
+    for (int pos = 0; pos < length; pos++)
+    {
 
         int token = tokens[pos];
+        if (token < 0 || token >= VOCAB_SIZE)
+            continue;
 
-        for (int i = 0; i < EMBED_SIZE; i++) {
-            output[pos][i] = model->embeddings[token][i];
+        for (int i = 0; i < EMBED_SIZE; i++)
+        {
+            output[pos][i] = model->embeddings[token][i] + model->position_embeddings[pos][i];
         }
     }
 }
