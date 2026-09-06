@@ -52,49 +52,6 @@ void model_init(Model *model)
             model->Wo[i][j] = random * 0.02f - 0.01f;
         }
     }
-    // Layer normalization parameters (gamma = 1, beta = 0)
-    for (int i = 0; i < EMBED_SIZE; i++)
-    {
-        model->ln1_gamma[i] = 1.0f;
-        model->ln1_beta[i] = 0.0f;
-        model->ln2_gamma[i] = 1.0f;
-        model->ln2_beta[i] = 0.0f;
-    }
-
-    // Feed-forward network weights
-    for (int i = 0; i < EMBED_SIZE; i++)
-    {
-        for (int j = 0; j < FFN_SIZE; j++)
-        {
-            float random = (float)rand() / (float)RAND_MAX;
-            model->W1[i][j] = random * 0.02f - 0.01f;
-        }
-    }
-    for (int i = 0; i < FFN_SIZE; i++)
-    {
-        model->b1[i] = 0.0f;
-    }
-    for (int i = 0; i < FFN_SIZE; i++)
-    {
-        for (int j = 0; j < EMBED_SIZE; j++)
-        {
-            float random = (float)rand() / (float)RAND_MAX;
-            model->W2[i][j] = random * 0.02f - 0.01f;
-        }
-    }
-    for (int i = 0; i < EMBED_SIZE; i++)
-    {
-        model->b2[i] = 0.0f;
-    }
-    // Output projection weights
-    for (int i = 0; i < EMBED_SIZE; i++)
-    {
-        for (int j = 0; j < VOCAB_SIZE; j++)
-        {
-            float random = (float)rand() / (float)RAND_MAX;
-            model->output_projection[i][j] = random * 0.02f - 0.01f;
-        }
-    }
 }
 void get_embedding(
     Model *model,
@@ -129,47 +86,3 @@ void embed_sequence(
         }
     }
 }
-
-// void feed_forward(
-//     Model *model,
-//     float input[EMBED_SIZE],
-//     float output[EMBED_SIZE])
-// {
-//     float hidden[FFN_SIZE];
-
-//     // First linear layer + ReLU
-//     for (int i = 0; i < FFN_SIZE; i++)
-//     {
-//         hidden[i] = model->b1[i];
-//         for (int j = 0; j < EMBED_SIZE; j++)
-//         {
-//             hidden[i] += input[j] * model->W1[j][i];
-//         }
-//         hidden[i] = hidden[i] > 0.0f ? hidden[i] : 0.0f;
-//     }
-
-//     // Second linear layer
-//     for (int i = 0; i < EMBED_SIZE; i++)
-//     {
-//         output[i] = model->b2[i];
-//         for (int j = 0; j < FFN_SIZE; j++)
-//         {
-//             output[i] += hidden[j] * model->W2[j][i];
-//         }
-//     }
-// }
-
-// void compute_logits(
-//     Model *model,
-//     float hidden[EMBED_SIZE],
-//     float logits[VOCAB_SIZE])
-// {
-//     for (int v = 0; v < VOCAB_SIZE; v++)
-//     {
-//         logits[v] = 0.0f;
-//         for (int i = 0; i < EMBED_SIZE; i++)
-//         {
-//             logits[v] += hidden[i] * model->output_projection[i][v];
-//         }
-//     }
-// }
