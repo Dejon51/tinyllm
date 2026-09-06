@@ -1,167 +1,89 @@
 #include <stdio.h>
 #include <stdlib.h>
-
 #include "tokenizer.h"
 #include "model.h"
 #include "attention.h"
+#include "training.h"
+
+void generate_text(
+    Model *model,
+    char *prompt,
+    int num_tokens_to_generate)
+{
+    int tokens[CONTEXT_SIZE];
+    int length = 0;
+
+    // Encode the prompt (up to CONTEXT_SIZE-1 to leave room for generation)
+    for (int i = 0; prompt[i] != '\0' && length < CONTEXT_SIZE - 1; i++)
+    {
+        tokens[length] = encode_char(prompt[i]);
+        length++;
+    }
+
+    // Print the prompt
+    printf("%s", prompt);
+
+    // Generate new tokens
+    for (int step = 0; step < num_tokens_to_generate; step++)
+    {
+        float embeddings[CONTEXT_SIZE][EMBED_SIZE];
+        float block_output[CONTEXT_SIZE][EMBED_SIZE];
+        float logits[VOCAB_SIZE];
+
+        // Embed the current sequence
+        embed_sequence(model, tokens, length, embeddings);
+
+        // Pass through transformer block
+        transformer_block(model, embeddings, length, block_output, NULL);
+
+        // Use the last token's output (the prediction for next token)
+        float *last_hidden = block_output[length - 1];
+
+        // Compute logits over vocabulary
+        compute_logits(model, last_hidden, logits);
+
+        // Sample the next token (temperature = 1.0 for now)
+        int next_token = sample_token(logits, 1.0f);
+
+        // Append to sequence
+        tokens[length] = next_token;
+        length++;
+
+        // Print the new character
+        printf("%c", decode_token(next_token));
+        fflush(stdout);
+
+        // Stop if we hit the max context size
+        if (length >= CONTEXT_SIZE - 1)
+            break;
+    }
+    printf("\n");
+}
+
 
 int main(void)
 {
     srand(42);
     Model model;
-
     model_init(&model);
 
-    char text[] = "hello";
-
-    int tokens[5];
-
-    // Convert characters into token IDs
-    for (int i = 0; i < 5; i++)
-    {
-        tokens[i] = encode_char(text[i]);
+    Dataset *data = load_dataset("data.txt");
+    if (!data) {
+        printf("Failed to load dataset\n");
+        return 1;
     }
 
-    float embeddings[CONTEXT_SIZE][EMBED_SIZE];
-
-    embed_sequence(
-        &model,
-        tokens,
-        5,
-        embeddings);
-
-    // Print the results
-    for (int pos = 0; pos < 5; pos++)
-    {
-
-        printf("'%c' (%d): ",
-               text[pos],
-               tokens[pos]);
-
-        for (int i = 0; i < EMBED_SIZE; i++)
-        {
-            printf("%.3f ", embeddings[pos][i]);
+    float learning_rate = 0.001f;
+    for (int step = 0; step < 1000000; step++) {
+        float loss = train_step(&model, data, learning_rate);
+        if (step % 100 == 0) {
+            printf("Step %d, loss = %f\n", step, loss);
+            // Optionally generate a sample
+            char prompt[] = "The ";
+            generate_text(&model, prompt, 100);
         }
-
-        printf("\n");
-    }
-    float query[EMBED_SIZE];
-
-    compute_query(
-        &model,
-        embeddings[0],
-        query);
-
-    printf("\nQuery for first token:\n");
-
-    for (int i = 0; i < EMBED_SIZE; i++)
-    {
-        printf("%.6f ", query[i]);
     }
 
-    printf("\n");
-    float key[EMBED_SIZE];
-
-    compute_key(
-        &model,
-        embeddings[0],
-        key);
-
-    printf("\nKey for first token:\n");
-
-    for (int i = 0; i < EMBED_SIZE; i++)
-    {
-        printf("%.6f ", key[i]);
-    }
-
-    printf("\n");
-
-    // Compute Q, K, and V for every token
-    float queries[CONTEXT_SIZE][EMBED_SIZE];
-    float keys[CONTEXT_SIZE][EMBED_SIZE];
-    float values[CONTEXT_SIZE][EMBED_SIZE];
-
-    for (int pos = 0; pos < 5; pos++)
-    {
-        compute_query(
-            &model,
-            embeddings[pos],
-            queries[pos]);
-
-        compute_key(
-            &model,
-            embeddings[pos],
-            keys[pos]);
-
-        compute_value(
-            &model,
-            embeddings[pos],
-            values[pos]);
-    }
-
-    // Compute attention scores
-    float scores[CONTEXT_SIZE][CONTEXT_SIZE];
-
-    compute_attention_scores(
-        queries,
-        keys,
-        5,
-        scores);
-
-    // Softmax each row
-
-    printf("\nRaw attention scores:\n");
-
-    for (int i = 0; i < 5; i++)
-    {
-        printf("'%c': ", text[i]);
-
-        for (int j = 0; j < 5; j++)
-        {
-            printf("%.10f ", scores[i][j]);
-        }
-
-        printf("\n");
-    }
-    for (int i = 0; i < 5; i++)
-    {
-        softmax(scores[i], 5);
-    }
-
-    // Print attention weights
-    printf("\nAttention weights:\n");
-
-    for (int i = 0; i < 5; i++)
-    {
-        printf("'%c': ", text[i]);
-
-        for (int j = 0; j < 5; j++)
-        {
-            printf("%.3f ", scores[i][j]);
-        }
-
-        printf("\n");
-    }
-    float attention_output[CONTEXT_SIZE][EMBED_SIZE];
-
-    compute_attention_output(
-        scores,
-        values,
-        5,
-        attention_output);
-
-    printf("\nAttention output:\n");
-
-    for (int i = 0; i < 5; i++)
-    {
-        printf("'%c': ", text[i]);
-
-        for (int k = 0; k < EMBED_SIZE; k++)
-        {
-            printf("%.6f ", attention_output[i][k]);
-        }
-
-        printf("\n");
-    }
+    free_dataset(data);
     return 0;
 }
