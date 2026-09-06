@@ -24,26 +24,32 @@ void model_init(Model *model)
             model->position_embeddings[pos][i] = random * 0.02f - 0.01f;
         }
     }
-    // Attention weights
+    // Attention weights for each head
+    for (int h = 0; h < NUM_HEADS; h++)
+    {
+        for (int i = 0; i < EMBED_SIZE; i++)
+        {
+            for (int j = 0; j < HEAD_SIZE; j++)
+            {
+                float random = (float)rand() / (float)RAND_MAX;
+                model->Wq[h][i][j] = random * 0.02f - 0.01f;
+
+                random = (float)rand() / (float)RAND_MAX;
+                model->Wk[h][i][j] = random * 0.02f - 0.01f;
+
+                random = (float)rand() / (float)RAND_MAX;
+                model->Wv[h][i][j] = random * 0.02f - 0.01f;
+            }
+        }
+    }
+
+    // Output projection Wo remains 2D
     for (int i = 0; i < EMBED_SIZE; i++)
     {
         for (int j = 0; j < EMBED_SIZE; j++)
         {
-
             float random = (float)rand() / (float)RAND_MAX;
-
-            model->Wq[i][j] =
-                random * 0.02f - 0.01f;
-
-            random = (float)rand() / (float)RAND_MAX;
-
-            model->Wk[i][j] =
-                random * 0.02f - 0.01f;
-
-            random = (float)rand() / (float)RAND_MAX;
-
-            model->Wv[i][j] =
-                random * 0.02f - 0.01f;
+            model->Wo[i][j] = random * 0.02f - 0.01f;
         }
     }
 }

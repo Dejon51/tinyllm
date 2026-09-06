@@ -142,6 +142,26 @@ int main(void)
 
         printf("\n");
     }
+    float attention_output[CONTEXT_SIZE][EMBED_SIZE];
 
+    compute_attention_output(
+        scores,
+        values,
+        5,
+        attention_output);
+
+    printf("\nAttention output:\n");
+
+    for (int i = 0; i < 5; i++)
+    {
+        printf("'%c': ", text[i]);
+
+        for (int k = 0; k < EMBED_SIZE; k++)
+        {
+            printf("%.6f ", attention_output[i][k]);
+        }
+
+        printf("\n");
+    }
     return 0;
 }
