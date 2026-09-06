@@ -75,5 +75,74 @@ int main(void)
     }
 
     printf("\n");
+
+    // Compute Q, K, and V for every token
+    float queries[CONTEXT_SIZE][EMBED_SIZE];
+    float keys[CONTEXT_SIZE][EMBED_SIZE];
+    float values[CONTEXT_SIZE][EMBED_SIZE];
+
+    for (int pos = 0; pos < 5; pos++)
+    {
+        compute_query(
+            &model,
+            embeddings[pos],
+            queries[pos]);
+
+        compute_key(
+            &model,
+            embeddings[pos],
+            keys[pos]);
+
+        compute_value(
+            &model,
+            embeddings[pos],
+            values[pos]);
+    }
+
+    // Compute attention scores
+    float scores[CONTEXT_SIZE][CONTEXT_SIZE];
+
+    compute_attention_scores(
+        queries,
+        keys,
+        5,
+        scores);
+
+    // Softmax each row
+
+    printf("\nRaw attention scores:\n");
+
+    for (int i = 0; i < 5; i++)
+    {
+        printf("'%c': ", text[i]);
+
+        for (int j = 0; j < 5; j++)
+        {
+            printf("%.10f ", scores[i][j]);
+        }
+
+        printf("\n");
+    }
+    for (int i = 0; i < 5; i++)
+    {
+        softmax(scores[i], 5);
+    }
+
+    // Print attention weights
+    printf("\nAttention weights:\n");
+
+    for (int i = 0; i < 5; i++)
+    {
+        printf("'%c': ", text[i]);
+
+        for (int j = 0; j < 5; j++)
+        {
+            printf("%.3f ", scores[i][j]);
+        }
+
+        printf("\n");
+    }
+
+    return 0;
     return 0;
 }
