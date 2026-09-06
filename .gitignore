@@ -9,3 +9,5 @@ build/
 
 # Test executable
 test.exe
+
+combined.txt

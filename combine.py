@@ -36,9 +36,7 @@ with open(output, "w", encoding="utf-8") as out:
 
         relative_path = file.relative_to(folder)
 
-        out.write("=" * 70)
         out.write(f"\nFILE: {relative_path}\n")
-        out.write("=" * 70)
         out.write("\n\n")
         out.write(text)
         out.write("\n\n")
