@@ -1,12 +1,12 @@
 #ifndef MODEL_H
 #define MODEL_H
 
-#define FFN_SIZE 128
+#define FFN_SIZE 512
 
-#define VOCAB_SIZE 128
-#define EMBED_SIZE 32
-#define CONTEXT_SIZE 64
-#define NUM_HEADS 4
+#define VOCAB_SIZE 10050
+#define EMBED_SIZE 128
+#define CONTEXT_SIZE 128
+#define NUM_HEADS 8
 #define HEAD_SIZE (EMBED_SIZE / NUM_HEADS)
 
 typedef struct
@@ -35,5 +35,10 @@ typedef struct
 void model_init(Model *model);
 void get_embedding(Model *model, int token, float *output);
 void embed_sequence(Model *model, int *tokens, int length, float output[CONTEXT_SIZE][EMBED_SIZE]);
+
+void save_model(Model *model, const char *filename);
+void load_model(Model *model, const char *filename);
+
+
 
 #endif

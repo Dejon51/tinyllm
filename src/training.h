@@ -77,4 +77,6 @@ void transformer_block_backward(
     float grad_input[CONTEXT_SIZE][EMBED_SIZE]
 );
 
+float train_batch(Model *model, Dataset *dataset, int batch_size, float learning_rate);
+
 #endif

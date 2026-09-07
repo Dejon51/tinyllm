@@ -1,27 +1,103 @@
 #include "attention.h"
 #include <math.h>
 #include <stdlib.h>
+#include <immintrin.h>
+
+/* -------------------- AVX2/FMA helpers -------------------- */
+
+/* Horizontal sum of 8 packed floats down to a scalar. */
+static inline float hsum256_ps(__m256 v)
+{
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    lo = _mm_add_ps(lo, hi);
+    __m128 shuf = _mm_movehdup_ps(lo);
+    __m128 sums = _mm_add_ps(lo, shuf);
+    shuf = _mm_movehl_ps(shuf, sums);
+    sums = _mm_add_ss(sums, shuf);
+    return _mm_cvtss_f32(sums);
+}
+
+/* dot(a, b) over n elements, 8-wide FMA with a scalar tail for n % 8 != 0. */
+static inline float dot_avx(const float *a, const float *b, int n)
+{
+    __m256 acc = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 8 <= n; i += 8)
+    {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        acc = _mm256_fmadd_ps(va, vb, acc);
+    }
+    float result = hsum256_ps(acc);
+    for (; i < n; i++)
+        result += a[i] * b[i];
+    return result;
+}
+
+/* out[i] += scalar * w[i] for i in [0, n), 8-wide FMA with scalar tail.
+   This is the core operation behind every mat-vec loop below: each column
+   of a weight matrix gets accumulated into the output, scaled by one
+   input element at a time. */
+static inline void fma_scale_accumulate(float *out, const float *w, float scalar, int n)
+{
+    __m256 vs = _mm256_set1_ps(scalar);
+    int i = 0;
+    for (; i + 8 <= n; i += 8)
+    {
+        __m256 vw = _mm256_loadu_ps(w + i);
+        __m256 vout = _mm256_loadu_ps(out + i);
+        vout = _mm256_fmadd_ps(vs, vw, vout);
+        _mm256_storeu_ps(out + i, vout);
+    }
+    for (; i < n; i++)
+        out[i] += scalar * w[i];
+}
+
+/* out[i] = 0 for i in [0, n). */
+static inline void vec_zero(float *out, int n)
+{
+    __m256 vz = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 8 <= n; i += 8)
+        _mm256_storeu_ps(out + i, vz);
+    for (; i < n; i++)
+        out[i] = 0.0f;
+}
+
+/* out[i] *= scalar for i in [0, n). */
+static inline void vec_scale(float *out, float scalar, int n)
+{
+    __m256 vs = _mm256_set1_ps(scalar);
+    int i = 0;
+    for (; i + 8 <= n; i += 8)
+    {
+        __m256 v = _mm256_loadu_ps(out + i);
+        v = _mm256_mul_ps(v, vs);
+        _mm256_storeu_ps(out + i, v);
+    }
+    for (; i < n; i++)
+        out[i] *= scalar;
+}
 
 /* -------------------- Basic utilities -------------------- */
 
 float dot_product(float a[EMBED_SIZE], float b[EMBED_SIZE])
 {
-    float result = 0.0f;
-    for (int i = 0; i < EMBED_SIZE; i++)
-        result += a[i] * b[i];
-    return result;
+    return dot_avx(a, b, EMBED_SIZE);
 }
 
 void softmax(float scores[CONTEXT_SIZE], int length)
 {
+    /* expf has no portable AVX2 equivalent in libc, so this stays scalar.
+       The sum and the final normalization are vectorized instead. */
     float sum = 0.0f;
     for (int i = 0; i < length; i++)
     {
         scores[i] = expf(scores[i]);
         sum += scores[i];
     }
-    for (int i = 0; i < length; i++)
-        scores[i] /= sum;
+    vec_scale(scores, 1.0f / sum, length);
 }
 
 void softmax_masked(float scores[CONTEXT_SIZE], int length)
@@ -36,8 +112,7 @@ void softmax_masked(float scores[CONTEXT_SIZE], int length)
         scores[i] = expf(scores[i] - max_score);
         sum += scores[i];
     }
-    for (int i = 0; i < length; i++)
-        scores[i] /= sum;
+    vec_scale(scores, 1.0f / sum, length);
 }
 
 /* -------------------- Single-head legacy -------------------- */
@@ -48,9 +123,11 @@ void compute_attention_scores(
     int length,
     float scores[CONTEXT_SIZE][CONTEXT_SIZE])
 {
+    float inv_sqrt_embed = 1.0f / sqrtf((float)EMBED_SIZE);
+
     for (int i = 0; i < length; i++)
         for (int j = 0; j < length; j++)
-            scores[i][j] = dot_product(queries[i], keys[j]) / sqrtf((float)EMBED_SIZE);
+            scores[i][j] = dot_avx(queries[i], keys[j], EMBED_SIZE) * inv_sqrt_embed;
 }
 
 void compute_attention_output(
@@ -60,12 +137,11 @@ void compute_attention_output(
     float output[CONTEXT_SIZE][EMBED_SIZE])
 {
     for (int i = 0; i < length; i++)
-        for (int k = 0; k < EMBED_SIZE; k++)
-        {
-            output[i][k] = 0.0f;
-            for (int j = 0; j < length; j++)
-                output[i][k] += scores[i][j] * values[j][k];
-        }
+    {
+        vec_zero(output[i], EMBED_SIZE);
+        for (int j = 0; j < length; j++)
+            fma_scale_accumulate(output[i], values[j], scores[i][j], EMBED_SIZE);
+    }
 }
 
 void compute_attention_scores_causal(
@@ -74,11 +150,13 @@ void compute_attention_scores_causal(
     int length,
     float scores[CONTEXT_SIZE][CONTEXT_SIZE])
 {
+    float inv_sqrt_embed = 1.0f / sqrtf((float)EMBED_SIZE);
+
     for (int i = 0; i < length; i++)
         for (int j = 0; j < length; j++)
         {
             if (j <= i)
-                scores[i][j] = dot_product(queries[i], keys[j]) / sqrtf((float)EMBED_SIZE);
+                scores[i][j] = dot_avx(queries[i], keys[j], EMBED_SIZE) * inv_sqrt_embed;
             else
                 scores[i][j] = -INFINITY;
         }
@@ -88,32 +166,23 @@ void compute_attention_scores_causal(
 
 void compute_query_head(Model *model, float input[EMBED_SIZE], int head, float output[HEAD_SIZE])
 {
-    for (int i = 0; i < HEAD_SIZE; i++)
-    {
-        output[i] = 0.0f;
-        for (int j = 0; j < EMBED_SIZE; j++)
-            output[i] += input[j] * model->Wq[head][j][i];
-    }
+    vec_zero(output, HEAD_SIZE);
+    for (int j = 0; j < EMBED_SIZE; j++)
+        fma_scale_accumulate(output, model->Wq[head][j], input[j], HEAD_SIZE);
 }
 
 void compute_key_head(Model *model, float input[EMBED_SIZE], int head, float output[HEAD_SIZE])
 {
-    for (int i = 0; i < HEAD_SIZE; i++)
-    {
-        output[i] = 0.0f;
-        for (int j = 0; j < EMBED_SIZE; j++)
-            output[i] += input[j] * model->Wk[head][j][i];
-    }
+    vec_zero(output, HEAD_SIZE);
+    for (int j = 0; j < EMBED_SIZE; j++)
+        fma_scale_accumulate(output, model->Wk[head][j], input[j], HEAD_SIZE);
 }
 
 void compute_value_head(Model *model, float input[EMBED_SIZE], int head, float output[HEAD_SIZE])
 {
-    for (int i = 0; i < HEAD_SIZE; i++)
-    {
-        output[i] = 0.0f;
-        for (int j = 0; j < EMBED_SIZE; j++)
-            output[i] += input[j] * model->Wv[head][j][i];
-    }
+    vec_zero(output, HEAD_SIZE);
+    for (int j = 0; j < EMBED_SIZE; j++)
+        fma_scale_accumulate(output, model->Wv[head][j], input[j], HEAD_SIZE);
 }
 
 void compute_attention_scores_head(
@@ -122,16 +191,13 @@ void compute_attention_scores_head(
     int length,
     float scores[CONTEXT_SIZE][CONTEXT_SIZE])
 {
+    float inv_sqrt_head = 1.0f / sqrtf((float)HEAD_SIZE);
+
     for (int i = 0; i < length; i++)
         for (int j = 0; j < length; j++)
         {
             if (j <= i)
-            {
-                float dot = 0.0f;
-                for (int k = 0; k < HEAD_SIZE; k++)
-                    dot += queries[i][k] * keys[j][k];
-                scores[i][j] = dot / sqrtf((float)HEAD_SIZE);
-            }
+                scores[i][j] = dot_avx(queries[i], keys[j], HEAD_SIZE) * inv_sqrt_head;
             else
                 scores[i][j] = -INFINITY;
         }
@@ -144,12 +210,11 @@ void compute_attention_output_head(
     float output[CONTEXT_SIZE][HEAD_SIZE])
 {
     for (int i = 0; i < length; i++)
-        for (int k = 0; k < HEAD_SIZE; k++)
-        {
-            output[i][k] = 0.0f;
-            for (int j = 0; j < length; j++)
-                output[i][k] += scores[i][j] * values[j][k];
-        }
+    {
+        vec_zero(output[i], HEAD_SIZE);
+        for (int j = 0; j < length; j++)
+            fma_scale_accumulate(output[i], values[j], scores[i][j], HEAD_SIZE);
+    }
 }
 
 /* -------------------- Multi-head attention (with cache) -------------------- */
@@ -218,12 +283,11 @@ void multi_head_attention(
                 cache->concatenated[pos][i] = concatenated[pos][i];
 
     for (int pos = 0; pos < length; pos++)
-        for (int i = 0; i < EMBED_SIZE; i++)
-        {
-            output[pos][i] = 0.0f;
-            for (int j = 0; j < EMBED_SIZE; j++)
-                output[pos][i] += concatenated[pos][j] * model->Wo[j][i];
-        }
+    {
+        vec_zero(output[pos], EMBED_SIZE);
+        for (int j = 0; j < EMBED_SIZE; j++)
+            fma_scale_accumulate(output[pos], model->Wo[j], concatenated[pos][j], EMBED_SIZE);
+    }
 
     if (cache != NULL)
         for (int pos = 0; pos < length; pos++)
@@ -239,22 +303,48 @@ void layer_norm(
     float beta[EMBED_SIZE],
     float output[EMBED_SIZE])
 {
-    float mean = 0.0f;
-    float variance = 0.0f;
-
-    for (int i = 0; i < EMBED_SIZE; i++) mean += input[i];
+    /* Vectorized mean reduction. */
+    __m256 vsum = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 8 <= EMBED_SIZE; i += 8)
+        vsum = _mm256_add_ps(vsum, _mm256_loadu_ps(&input[i]));
+    float mean = hsum256_ps(vsum);
+    for (; i < EMBED_SIZE; i++)
+        mean += input[i];
     mean /= EMBED_SIZE;
 
-    for (int i = 0; i < EMBED_SIZE; i++)
+    /* Vectorized variance reduction: sum((x - mean)^2) via FMA. */
+    __m256 vmean = _mm256_set1_ps(mean);
+    __m256 vvar = _mm256_setzero_ps();
+    i = 0;
+    for (; i + 8 <= EMBED_SIZE; i += 8)
+    {
+        __m256 diff = _mm256_sub_ps(_mm256_loadu_ps(&input[i]), vmean);
+        vvar = _mm256_fmadd_ps(diff, diff, vvar);
+    }
+    float variance = hsum256_ps(vvar);
+    for (; i < EMBED_SIZE; i++)
     {
         float diff = input[i] - mean;
         variance += diff * diff;
     }
     variance /= EMBED_SIZE;
 
-    float std = sqrtf(variance + 1e-5f);
-    for (int i = 0; i < EMBED_SIZE; i++)
-        output[i] = gamma[i] * (input[i] - mean) / std + beta[i];
+    /* Vectorized elementwise combine: gamma * (x - mean) * inv_std + beta. */
+    float inv_std = 1.0f / sqrtf(variance + 1e-5f);
+    __m256 vinv_std = _mm256_set1_ps(inv_std);
+    i = 0;
+    for (; i + 8 <= EMBED_SIZE; i += 8)
+    {
+        __m256 vx = _mm256_loadu_ps(&input[i]);
+        __m256 vg = _mm256_loadu_ps(&gamma[i]);
+        __m256 vb = _mm256_loadu_ps(&beta[i]);
+        __m256 t = _mm256_mul_ps(_mm256_sub_ps(vx, vmean), vinv_std);
+        __m256 vout = _mm256_fmadd_ps(vg, t, vb);
+        _mm256_storeu_ps(&output[i], vout);
+    }
+    for (; i < EMBED_SIZE; i++)
+        output[i] = gamma[i] * (input[i] - mean) * inv_std + beta[i];
 }
 
 /* -------------------- Feed-forward -------------------- */
@@ -267,24 +357,32 @@ void feed_forward(Model *model, float input[EMBED_SIZE], float output[EMBED_SIZE
 
 void feed_forward_forward(Model *model, float input[EMBED_SIZE], float output[EMBED_SIZE], float hidden_pre_relu[FFN_SIZE])
 {
+    /* First layer: y = x @ W1 + b1 via broadcast-FMA over FFN_SIZE. */
     for (int i = 0; i < FFN_SIZE; i++)
-    {
-        float sum = model->b1[i];
-        for (int j = 0; j < EMBED_SIZE; j++)
-            sum += input[j] * model->W1[j][i];
-        hidden_pre_relu[i] = sum;
-    }
+        hidden_pre_relu[i] = model->b1[i];
 
-    for (int i = 0; i < EMBED_SIZE; i++)
+    for (int j = 0; j < EMBED_SIZE; j++)
+        fma_scale_accumulate(hidden_pre_relu, model->W1[j], input[j], FFN_SIZE);
+
+    /* ReLU computed once per hidden unit (not once per output element). */
+    float activated[FFN_SIZE];
+    int k = 0;
+    __m256 vzero = _mm256_setzero_ps();
+    for (; k + 8 <= FFN_SIZE; k += 8)
     {
-        float sum = model->b2[i];
-        for (int j = 0; j < FFN_SIZE; j++)
-        {
-            float activated = hidden_pre_relu[j] > 0.0f ? hidden_pre_relu[j] : 0.0f;
-            sum += activated * model->W2[j][i];
-        }
-        output[i] = sum;
+        __m256 v = _mm256_loadu_ps(&hidden_pre_relu[k]);
+        v = _mm256_max_ps(v, vzero);
+        _mm256_storeu_ps(&activated[k], v);
     }
+    for (; k < FFN_SIZE; k++)
+        activated[k] = hidden_pre_relu[k] > 0.0f ? hidden_pre_relu[k] : 0.0f;
+
+    /* Second layer: y = relu(h) @ W2 + b2 via broadcast-FMA over EMBED_SIZE. */
+    for (int i = 0; i < EMBED_SIZE; i++)
+        output[i] = model->b2[i];
+
+    for (int j = 0; j < FFN_SIZE; j++)
+        fma_scale_accumulate(output, model->W2[j], activated[j], EMBED_SIZE);
 }
 
 /* -------------------- Transformer block -------------------- */
@@ -346,16 +444,16 @@ void transformer_block(
 
 void compute_logits(Model *model, float hidden[EMBED_SIZE], float logits[VOCAB_SIZE])
 {
-    for (int v = 0; v < VOCAB_SIZE; v++)
-    {
-        logits[v] = 0.0f;
-        for (int i = 0; i < EMBED_SIZE; i++)
-            logits[v] += hidden[i] * model->output_projection[i][v];
-    }
+    vec_zero(logits, VOCAB_SIZE);
+    for (int i = 0; i < EMBED_SIZE; i++)
+        fma_scale_accumulate(logits, model->output_projection[i], hidden[i], VOCAB_SIZE);
 }
 
 int sample_token(float logits[VOCAB_SIZE], float temperature)
 {
+    /* expf is scalar (no portable AVX2 exp); this loop dominates the cost
+       here, so vectorizing the sum around it buys little. Normalization
+       is skipped entirely: r < cumsum/sum  <=>  r*sum < cumsum. */
     float probs[VOCAB_SIZE];
     float sum = 0.0f;
     for (int i = 0; i < VOCAB_SIZE; i++)
@@ -363,16 +461,76 @@ int sample_token(float logits[VOCAB_SIZE], float temperature)
         probs[i] = expf(logits[i] / temperature);
         sum += probs[i];
     }
-    for (int i = 0; i < VOCAB_SIZE; i++)
-        probs[i] /= sum;
 
     float r = (float)rand() / (float)RAND_MAX;
+    float target = r * sum;
     float cumsum = 0.0f;
     for (int i = 0; i < VOCAB_SIZE; i++)
     {
         cumsum += probs[i];
-        if (r < cumsum)
+        if (target < cumsum)
             return i;
     }
     return VOCAB_SIZE - 1;
+}
+
+int sample_token_topk(float logits[VOCAB_SIZE], float temperature, int k)
+{
+    // Ensure k is within vocabulary size
+    if (k > VOCAB_SIZE) k = VOCAB_SIZE;
+    if (k <= 0) k = 1;
+
+    // Create an array of indices and sort by logit value descending
+    int indices[VOCAB_SIZE];
+    float logits_copy[VOCAB_SIZE];
+    for (int i = 0; i < VOCAB_SIZE; i++) {
+        indices[i] = i;
+        logits_copy[i] = logits[i];
+    }
+
+    // Simple selection sort for top k (for speed, could use partial sort)
+    // We'll do full sort for simplicity; it's okay for 10k elements.
+    for (int i = 0; i < VOCAB_SIZE - 1; i++) {
+        for (int j = i + 1; j < VOCAB_SIZE; j++) {
+            if (logits_copy[j] > logits_copy[i]) {
+                // swap values
+                float tmp = logits_copy[i];
+                logits_copy[i] = logits_copy[j];
+                logits_copy[j] = tmp;
+                // swap indices
+                int tmp_idx = indices[i];
+                indices[i] = indices[j];
+                indices[j] = tmp_idx;
+            }
+        }
+    }
+
+    // Find threshold = k-th largest logit
+    float threshold = logits_copy[k - 1];
+
+    // Compute probabilities with temperature, only for top k tokens
+    float probs[VOCAB_SIZE] = {0.0f};
+    float sum = 0.0f;
+    for (int i = 0; i < k; i++) {
+        int idx = indices[i];
+        float p = expf(logits[idx] / temperature);
+        probs[idx] = p;
+        sum += p;
+    }
+    // Normalize
+    for (int i = 0; i < VOCAB_SIZE; i++) {
+        if (probs[i] > 0) probs[i] /= sum;
+    }
+
+    // Sample from the distribution
+    float r = (float)rand() / (float)RAND_MAX;
+    float cumsum = 0.0f;
+    for (int i = 0; i < VOCAB_SIZE; i++) {
+        cumsum += probs[i];
+        if (r < cumsum) {
+            return i;
+        }
+    }
+    // Fallback to the most likely token
+    return indices[0];
 }

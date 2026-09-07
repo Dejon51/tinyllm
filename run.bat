@@ -7,4 +7,4 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
-gcc -O2 -Wall -Wextra -std=c11 src\*.c -o tinygpt.exe -lm
+gcc -Wall -Wextra -std=c11 src\*.c -o tinygpt.exe -flto -O3 -march=native -lm

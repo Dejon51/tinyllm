@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include "model.h"
+#include <stdio.h>
 
 void model_init(Model *model)
 {
@@ -173,3 +174,21 @@ void embed_sequence(
 //         }
 //     }
 // }
+
+void save_model(Model *model, const char *filename)
+{
+    FILE *f = fopen(filename, "wb");
+    if (f) {
+        fwrite(model, sizeof(Model), 1, f);
+        fclose(f);
+    }
+}
+
+void load_model(Model *model, const char *filename)
+{
+    FILE *f = fopen(filename, "rb");
+    if (f) {
+        fread(model, sizeof(Model), 1, f);
+        fclose(f);
+    }
+}

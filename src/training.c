@@ -1,10 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include "training.h"
 #include "tokenizer.h"
 
 /* -------------------- Dataset -------------------- */
+
+static Gradients grads;
 
 Dataset *load_dataset(const char *filename)
 {
@@ -13,16 +16,28 @@ Dataset *load_dataset(const char *filename)
     fseek(file, 0, SEEK_END);
     long size = ftell(file);
     fseek(file, 0, SEEK_SET);
-    char *buf = malloc(size+1);
+    char *buf = malloc(size + 1);
     fread(buf, 1, size, file);
     buf[size] = '\0';
     fclose(file);
 
     Dataset *ds = malloc(sizeof(Dataset));
-    ds->length = size;
+    // Allocate maximum possible tokens (if each char is a word, but usually fewer)
     ds->tokens = malloc(size * sizeof(int));
-    for (int i=0; i<size; i++) ds->tokens[i] = encode_char(buf[i]);
+    ds->length = 0;
+
+    char *token = strtok(buf, " \t\n\r\f\v.,;:!?\"()[]{}<>-");
+    while (token != NULL)
+    {
+        // Convert to lowercase
+        for (int i = 0; token[i]; i++) token[i] = tolower(token[i]);
+        ds->tokens[ds->length++] = encode_word(token);
+        token = strtok(NULL, " \t\n\r\f\v.,;:!?\"()[]{}<>-");
+    }
+
     free(buf);
+    // Shrink tokens array to actual length
+    ds->tokens = realloc(ds->tokens, ds->length * sizeof(int));
     return ds;
 }
 
@@ -388,8 +403,8 @@ float train_step(Model *model, Dataset *dataset, float learning_rate)
         inputs[i] = dataset->tokens[start + i];
     target = dataset->tokens[start + context_length];
 
-    // Forward pass with cache
-    TransformerBlockCache block_cache;
+    // Use the file-scope static TransformerBlockCache
+    static TransformerBlockCache block_cache;
     transformer_cache_init(&block_cache);
 
     float embeddings[CONTEXT_SIZE][EMBED_SIZE];
@@ -404,12 +419,10 @@ float train_step(Model *model, Dataset *dataset, float learning_rate)
     float grad_logits[VOCAB_SIZE];
     float loss = cross_entropy_loss(logits, target, grad_logits);
 
-    // Gradients for output projection and last hidden
-    Gradients grads;
+    // Reinitialize grads (static) for this step
     init_gradients(&grads);
 
     float grad_last_hidden[EMBED_SIZE];
-    // backward output projection
     for (int i = 0; i < EMBED_SIZE; i++)
         for (int v = 0; v < VOCAB_SIZE; v++)
             grads.output_projection[i][v] += block_output[context_length - 1][i] * grad_logits[v];
@@ -420,16 +433,13 @@ float train_step(Model *model, Dataset *dataset, float learning_rate)
             grad_last_hidden[i] += model->output_projection[i][v] * grad_logits[v];
     }
 
-    // We need gradient w.r.t. all block outputs; only last token has gradient, others zero.
     float grad_block_output[CONTEXT_SIZE][EMBED_SIZE] = {0};
     for (int i = 0; i < EMBED_SIZE; i++)
         grad_block_output[context_length - 1][i] = grad_last_hidden[i];
 
-    // Backward through transformer block
     float grad_embeddings[CONTEXT_SIZE][EMBED_SIZE] = {0};
     transformer_block_backward(model, &grads, &block_cache, grad_block_output, grad_embeddings);
 
-    // Gradient for embeddings (token + position)
     for (int pos = 0; pos < context_length; pos++) {
         int token = inputs[pos];
         for (int i = 0; i < EMBED_SIZE; i++) {
@@ -438,8 +448,72 @@ float train_step(Model *model, Dataset *dataset, float learning_rate)
         }
     }
 
-    // Apply gradients
     apply_gradients(model, &grads, learning_rate);
-
     return loss;
+}
+
+float train_batch(Model *model, Dataset *dataset, int batch_size, float learning_rate)
+{
+    const int context_length = CONTEXT_SIZE - 1;
+    float total_loss = 0.0f;
+    init_gradients(&grads);  // zero out before batch
+
+    // Reuse a static block cache for each sample
+    static TransformerBlockCache block_cache;
+
+    for (int b = 0; b < batch_size; b++)
+    {
+        int max_start = dataset->length - context_length - 1;
+        if (max_start < 0) return 0.0f;
+        int start = rand() % (max_start + 1);
+        int inputs[context_length];
+        int target;
+        for (int i = 0; i < context_length; i++)
+            inputs[i] = dataset->tokens[start + i];
+        target = dataset->tokens[start + context_length];
+
+        transformer_cache_init(&block_cache);
+
+        float embeddings[CONTEXT_SIZE][EMBED_SIZE];
+        embed_sequence(model, inputs, context_length, embeddings);
+
+        float block_output[CONTEXT_SIZE][EMBED_SIZE];
+        transformer_block(model, embeddings, context_length, block_output, &block_cache);
+
+        float logits[VOCAB_SIZE];
+        compute_logits(model, block_output[context_length - 1], logits);
+
+        float grad_logits[VOCAB_SIZE];
+        float loss = cross_entropy_loss(logits, target, grad_logits);
+        total_loss += loss;
+
+        for (int i = 0; i < EMBED_SIZE; i++)
+            for (int v = 0; v < VOCAB_SIZE; v++)
+                grads.output_projection[i][v] += block_output[context_length - 1][i] * grad_logits[v];
+
+        float grad_last_hidden[EMBED_SIZE] = {0};
+        for (int i = 0; i < EMBED_SIZE; i++)
+            for (int v = 0; v < VOCAB_SIZE; v++)
+                grad_last_hidden[i] += model->output_projection[i][v] * grad_logits[v];
+
+        float grad_block_output[CONTEXT_SIZE][EMBED_SIZE] = {0};
+        for (int i = 0; i < EMBED_SIZE; i++)
+            grad_block_output[context_length - 1][i] = grad_last_hidden[i];
+
+        float grad_embeddings[CONTEXT_SIZE][EMBED_SIZE] = {0};
+        transformer_block_backward(model, &grads, &block_cache, grad_block_output, grad_embeddings);
+
+        for (int pos = 0; pos < context_length; pos++) {
+            int token = inputs[pos];
+            for (int i = 0; i < EMBED_SIZE; i++) {
+                grads.embeddings[token][i] += grad_embeddings[pos][i];
+                grads.position_embeddings[pos][i] += grad_embeddings[pos][i];
+            }
+        }
+    }
+
+    float inv_batch = 1.0f / batch_size;
+    apply_gradients(model, &grads, learning_rate * inv_batch);
+
+    return total_loss / batch_size;
 }

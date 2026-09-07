@@ -90,4 +90,6 @@ void transformer_block(
 void compute_logits(Model *model, float hidden[EMBED_SIZE], float logits[VOCAB_SIZE]);
 int sample_token(float logits[VOCAB_SIZE], float temperature);
 
+int sample_token_topk(float logits[VOCAB_SIZE], float temperature, int k);
+
 #endif
