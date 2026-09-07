@@ -476,11 +476,9 @@ int sample_token(float logits[VOCAB_SIZE], float temperature)
 
 int sample_token_topk(float logits[VOCAB_SIZE], float temperature, int k)
 {
-    // Ensure k is within vocabulary size
     if (k > VOCAB_SIZE) k = VOCAB_SIZE;
     if (k <= 0) k = 1;
 
-    // Create an array of indices and sort by logit value descending
     int indices[VOCAB_SIZE];
     float logits_copy[VOCAB_SIZE];
     for (int i = 0; i < VOCAB_SIZE; i++) {
@@ -488,49 +486,44 @@ int sample_token_topk(float logits[VOCAB_SIZE], float temperature, int k)
         logits_copy[i] = logits[i];
     }
 
-    // Simple selection sort for top k (for speed, could use partial sort)
-    // We'll do full sort for simplicity; it's okay for 10k elements.
-    for (int i = 0; i < VOCAB_SIZE - 1; i++) {
-        for (int j = i + 1; j < VOCAB_SIZE; j++) {
-            if (logits_copy[j] > logits_copy[i]) {
-                // swap values
-                float tmp = logits_copy[i];
-                logits_copy[i] = logits_copy[j];
-                logits_copy[j] = tmp;
-                // swap indices
-                int tmp_idx = indices[i];
-                indices[i] = indices[j];
-                indices[j] = tmp_idx;
-            }
+    /* Partial selection sort: only the first k slots need to end up
+       sorted descending, so the outer loop stops after k passes
+       instead of VOCAB_SIZE - 1. O(n*k) instead of O(n^2) - a large
+       win whenever k << VOCAB_SIZE. */
+    for (int i = 0; i < k; i++) {
+        int max_idx = i;
+        for (int j = i + 1; j < VOCAB_SIZE; j++)
+            if (logits_copy[j] > logits_copy[max_idx])
+                max_idx = j;
+        if (max_idx != i) {
+            float tf = logits_copy[i];
+            logits_copy[i] = logits_copy[max_idx];
+            logits_copy[max_idx] = tf;
+            int ti = indices[i];
+            indices[i] = indices[max_idx];
+            indices[max_idx] = ti;
         }
     }
 
-    // Find threshold = k-th largest logit
-    float threshold = logits_copy[k - 1];
-
-    // Compute probabilities with temperature, only for top k tokens
-    float probs[VOCAB_SIZE] = {0.0f};
+    /* Compact size-k arrays instead of full VOCAB_SIZE probs: avoids the
+       O(VOCAB_SIZE) zero-fill and the O(VOCAB_SIZE) scans the old
+       normalize/sample loops did over mostly-zero entries. */
+    float probs[k];
     float sum = 0.0f;
     for (int i = 0; i < k; i++) {
-        int idx = indices[i];
-        float p = expf(logits[idx] / temperature);
-        probs[idx] = p;
-        sum += p;
-    }
-    // Normalize
-    for (int i = 0; i < VOCAB_SIZE; i++) {
-        if (probs[i] > 0) probs[i] /= sum;
+        probs[i] = expf(logits_copy[i] / temperature);
+        sum += probs[i];
     }
 
-    // Sample from the distribution
+    /* Same trick as sample_token(): r < cumsum/sum <=> r*sum < cumsum,
+       so no separate normalization pass is needed. */
     float r = (float)rand() / (float)RAND_MAX;
+    float target = r * sum;
     float cumsum = 0.0f;
-    for (int i = 0; i < VOCAB_SIZE; i++) {
+    for (int i = 0; i < k; i++) {
         cumsum += probs[i];
-        if (r < cumsum) {
-            return i;
-        }
+        if (target < cumsum)
+            return indices[i];
     }
-    // Fallback to the most likely token
-    return indices[0];
+    return indices[k - 1];
 }
